@@ -1,0 +1,8 @@
+{
+  "name": "bambu-3mf",
+  "description": "Read, modify, and write Bambu Studio .3mf project files with byte-perfect round-trip fidelity. Handles meshes, per-triangle painting, multi-plate layout, AMS filament mapping, 700+ print settings, gcode bundles, and all Bambu extensions.",
+  "author": {
+    "name": "lostprojects",
+    "email": "riseoftherobots@mac.com"
+  }
+}
