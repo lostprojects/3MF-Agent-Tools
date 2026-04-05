@@ -1,5 +1,5 @@
 """
-bambu3mf — Bambu Studio .3mf reader/writer with byte-perfect round-trip fidelity.
+bambu3mf — Bambu Studio .3mf reader/writer for practical inspection and editing.
 
 Pure Python stdlib. No dependencies.
 

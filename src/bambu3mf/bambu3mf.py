@@ -1,7 +1,7 @@
 """
 bambu3mf.py v2 — Precision Bambu Lab 3MF reader/writer
 
-Reads and writes Bambu Studio .3mf project files with full fidelity:
+Reads and writes Bambu Studio .3mf project files for practical inspection and editing:
   - Core 3MF mesh data (vertices, triangles, transforms)
   - Per-triangle painting (support, seam, color/MMU, fuzzy skin)
   - Multi-plate layout with per-plate settings
@@ -9,18 +9,16 @@ Reads and writes Bambu Studio .3mf project files with full fidelity:
   - Per-object and per-part print setting overrides
   - Cut/connector information
   - Thumbnails and auxiliary files
-  - Project settings (700+ slicer keys)
+    - Project settings and other slicer metadata
   - Gcode bundles (gcode.3mf)
   - Assembly/assemble transforms
   - Embedded presets (process, filament, machine settings)
   - Custom gcode per layer, layer heights profile, brim ear points
-  - Print profile config
-  - Shape configuration / emboss text (BambuStudioShape)
+    - Print profile config
 
-All XML element names, attribute names, and namespace URIs match
-BambuStudio source (bbs_3mf.cpp) exactly — verified against the actual
-C++ constants in the GitHub repo, the 3MF Core Specification, the
-3MF Production Extension, and the 3MF Materials Extension.
+Core namespaces, relationship types, and major attribute names are
+verified against BambuStudio source (bbs_3mf.cpp) and the 3MF Core,
+Production, and Materials specifications.
 
 v2 changes from v1:
   - Added OBJECT_UUID_SUFFIX2 for mesh sharing (verified: bbs_3mf.cpp:268)
@@ -231,10 +229,14 @@ class Part:
     source_offset_x: str = "0"    # SOURCE_OFFSET_X_KEY
     source_offset_y: str = "0"    # SOURCE_OFFSET_Y_KEY
     source_offset_z: str = "0"    # SOURCE_OFFSET_Z_KEY
+    source_in_inches: str = ""    # SOURCE_IN_INCHES_KEY
+    source_in_meters: str = ""    # SOURCE_IN_METERS_KEY
     mesh_stat: Optional[MeshStat] = None
     extruder: Optional[str] = None
     # v2: mesh_shared flag (bbs_3mf.cpp:360)
     mesh_shared: Optional[str] = None
+    text_info: Optional["TextInfo"] = None
+    shape_config: Optional["ShapeConfig"] = None
     # Any additional metadata key/value pairs
     extra_metadata: dict = field(default_factory=dict)
 
@@ -245,6 +247,9 @@ class TextInfo:
     text: str = ""               # TEXT_ATTR
     font_name: str = ""          # FONT_NAME_ATTR
     font_version: str = ""       # FONT_VERSION_ATTR
+    style_name: str = ""         # STYLE_NAME_ATTR
+    boldness: str = ""           # BOLDNESS_ATTR
+    skew: str = ""               # SKEW_ATTR
     font_index: str = ""         # FONT_INDEX_ATTR
     font_size: str = ""          # FONT_SIZE_ATTR
     thickness: str = ""          # THICKNESS_ATTR
@@ -268,6 +273,7 @@ class ShapeConfig:
     depth: str = ""              # DEPTH_ATTR
     use_surface: str = ""        # USE_SURFACE_ATTR
     unhealed: str = ""           # UNHEALED_ATTR
+    transform: str = ""          # TRANSFORM_ATTR
     filepath: str = ""           # SVG_FILE_PATH_ATTR
     filepath3mf: str = ""        # SVG_FILE_PATH_IN_3MF_ATTR
     # Font descriptor fields (bbs_3mf.cpp:372-390)
@@ -287,6 +293,7 @@ class ShapeConfig:
     face_name: str = ""
     style: str = ""
     weight: str = ""
+    svg_file_data: bytes = b""
     # Raw attributes for forward-compat
     extra: dict = field(default_factory=dict)
 
@@ -301,6 +308,7 @@ class ModelObject:
     """An object in the 3MF project."""
     id: int
     uuid: str = ""
+    backup_id: Optional[int] = None
     type: str = "model"         # model, support, other
     name: str = ""
     extruder: Optional[str] = None
@@ -338,6 +346,7 @@ class BuildItem:
     Verified: bbs_3mf.cpp:287-291"""
     objectid: int               # OBJECTID_ATTR
     uuid: str = ""              # PUUID_ATTR
+    path: str = ""              # PPATH_ATTR
     transform: str = "1 0 0 0 1 0 0 0 1 0 0 0"  # TRANSFORM_ATTR
     printable: str = "1"        # PRINTABLE_ATTR
 
@@ -459,6 +468,7 @@ class SlicePlate:
     filaments: list = field(default_factory=list)   # list of SliceFilament
     objects: list = field(default_factory=list)      # list of dicts
     warnings: list = field(default_factory=list)     # list of dicts
+    layer_filament_lists: list = field(default_factory=list)  # list of dicts
     extra: dict = field(default_factory=dict)
 
 @dataclass
@@ -480,7 +490,8 @@ class PatternBBox:
 
 class Bambu3MF:
     """
-    Full-fidelity reader/writer for Bambu Studio .3mf project files.
+    Reader/writer for Bambu Studio .3mf project files focused on safe inspection
+    and editing while preserving unmodified payloads when possible.
 
     Attributes:
         metadata        dict of model-level metadata (Application, Title, etc.)
@@ -559,7 +570,7 @@ class Bambu3MF:
 
     @classmethod
     def load(cls, path: str) -> "Bambu3MF":
-        """Load a Bambu .3mf file with full fidelity."""
+        """Load a Bambu .3mf file."""
         proj = cls()
         with zipfile.ZipFile(path, "r") as z:
             names = set(z.namelist())
@@ -592,8 +603,9 @@ class Bambu3MF:
                 raw = z.read("Metadata/model_settings.config")
                 proj._model_settings_raw = raw
                 proj._parse_model_settings(raw)
+                proj._load_embedded_shape_files(z, names)
 
-            # 5) Parse project_settings.config (JSON) — preserve raw for byte-perfect round-trip
+            # 5) Parse project_settings.config (JSON) — preserve raw formatting when possible
             if "Metadata/project_settings.config" in names:
                 raw = z.read("Metadata/project_settings.config").decode("utf-8")
                 proj._project_settings_raw = raw
@@ -755,6 +767,9 @@ class Bambu3MF:
             if self._model_config_rels_xml:
                 z.writestr("Metadata/_rels/model_settings.config.rels",
                            self._model_config_rels_xml.decode("utf-8"))
+            elif self.gcode_files:
+                z.writestr("Metadata/_rels/model_settings.config.rels",
+                           self._build_model_config_rels())
 
             # 11) Plate JSON — use raw if unmodified
             for idx, data in self.pattern_bboxes.items():
@@ -781,9 +796,16 @@ class Bambu3MF:
             for name, data in self.gcode_files.items():
                 z.writestr(name, data)
 
+            shape_svg_files = self._collect_shape_svg_files()
+
             # 15) Everything else (includes embedded presets, custom gcode,
             #     layer heights, brim points, print profile, filament sequence, etc.)
             for name, data in self.raw_files.items():
+                if name in shape_svg_files:
+                    continue
+                z.writestr(name, data)
+
+            for name, data in shape_svg_files.items():
                 z.writestr(name, data)
 
     # ─── PARSERS ─────────────────────────────────────────────────────────────
@@ -817,6 +839,12 @@ class Bambu3MF:
                     id=int(obj_el.get("id", 0)),
                     uuid=obj_el.get(f"{{{NS_PRODUCTION}}}UUID",
                                     obj_el.get(f"{{{NS_PRODUCTION}}}uuid", "")),
+                    backup_id=self._extract_uuid_seed(
+                        obj_el.get(f"{{{NS_PRODUCTION}}}UUID",
+                                   obj_el.get(f"{{{NS_PRODUCTION}}}uuid", "")),
+                        OBJECT_UUID_SUFFIX,
+                        OBJECT_UUID_SUFFIX2,
+                    ),
                     type=obj_el.get("type", "model"),
                     name=obj_el.get("name", ""),
                     _name_in_main_model=_has_name,
@@ -857,6 +885,7 @@ class Bambu3MF:
                     objectid=int(item.get("objectid", 0)),
                     uuid=item.get(f"{{{NS_PRODUCTION}}}UUID",
                                   item.get(f"{{{NS_PRODUCTION}}}uuid", "")),
+                    path=item.get(f"{{{NS_PRODUCTION}}}path", ""),
                     transform=item.get("transform", "1 0 0 0 1 0 0 0 1 0 0 0"),
                     printable=item.get("printable", "1"),
                 )
@@ -913,6 +942,11 @@ class Bambu3MF:
                     id=int(obj_el.get("id", 0)),
                     uuid=obj_el.get(f"{{{NS_PRODUCTION}}}UUID",
                                     obj_el.get(f"{{{NS_PRODUCTION}}}uuid", "")),
+                    backup_id=self._extract_uuid_seed(
+                        obj_el.get(f"{{{NS_PRODUCTION}}}UUID",
+                                   obj_el.get(f"{{{NS_PRODUCTION}}}uuid", "")),
+                        SUB_OBJECT_UUID_SUFFIX,
+                    ),
                     type=obj_el.get("type", "model"),
                 )
                 mesh_el = obj_el.find(_core("mesh"))
@@ -974,12 +1008,80 @@ class Bambu3MF:
                         part.source_offset_y = value
                     elif key == "source_offset_z":
                         part.source_offset_z = value
+                    elif key == "source_in_inches":
+                        part.source_in_inches = value
+                    elif key == "source_in_meters":
+                        part.source_in_meters = value
                     elif key == "extruder":
                         part.extruder = value
                     elif key == "mesh_shared":
                         part.mesh_shared = value
                     elif key:
                         part.extra_metadata[key] = value
+
+                for child in list(part_el):
+                    if child.tag == "text_info":
+                        text_info = TextInfo(
+                            text=child.get("text", ""),
+                            font_name=child.get("font_name", ""),
+                            font_version=child.get("font_version", ""),
+                            style_name=child.get("style_name", ""),
+                            boldness=child.get("boldness", ""),
+                            skew=child.get("skew", ""),
+                            font_index=child.get("font_index", ""),
+                            font_size=child.get("font_size", ""),
+                            thickness=child.get("thickness", ""),
+                            embeded_depth=child.get("embeded_depth", ""),
+                            rotate_angle=child.get("rotate_angle", ""),
+                            text_gap=child.get("text_gap", ""),
+                            bold=child.get("bold", ""),
+                            italic=child.get("italic", ""),
+                            surface_type=child.get("surface_type", ""),
+                            surface_text=child.get("surface_text", ""),
+                            keep_horizontal=child.get("keep_horizontal", ""),
+                            hit_mesh=child.get("hit_mesh", ""),
+                            hit_position=child.get("hit_position", ""),
+                            hit_normal=child.get("hit_normal", ""),
+                        )
+                        part.text_info = text_info
+                        if obj.text_info is None:
+                            obj.text_info = text_info
+                    elif child.tag in {"BambuStudioShape", "slic3rpe:shape"}:
+                        known = {
+                            "scale", "depth", "use_surface", "unhealed", "transform", "filepath", "filepath3mf",
+                            "style_name", "font_descriptor", "font_descriptor_type", "char_gap", "line_gap",
+                            "line_height", "boldness", "skew", "per_glyph", "horizontal", "vertical",
+                            "collection", "family", "face_name", "style", "weight",
+                        }
+                        shape_config = ShapeConfig(
+                            scale=child.get("scale", ""),
+                            depth=child.get("depth", ""),
+                            use_surface=child.get("use_surface", ""),
+                            unhealed=child.get("unhealed", ""),
+                            transform=child.get("transform", ""),
+                            filepath=child.get("filepath", ""),
+                            filepath3mf=child.get("filepath3mf", ""),
+                            style_name=child.get("style_name", ""),
+                            font_descriptor=child.get("font_descriptor", ""),
+                            font_descriptor_type=child.get("font_descriptor_type", ""),
+                            char_gap=child.get("char_gap", ""),
+                            line_gap=child.get("line_gap", ""),
+                            line_height=child.get("line_height", ""),
+                            boldness=child.get("boldness", ""),
+                            skew=child.get("skew", ""),
+                            per_glyph=child.get("per_glyph", ""),
+                            horizontal=child.get("horizontal", ""),
+                            vertical=child.get("vertical", ""),
+                            collection=child.get("collection", ""),
+                            family=child.get("family", ""),
+                            face_name=child.get("face_name", ""),
+                            style=child.get("style", ""),
+                            weight=child.get("weight", ""),
+                            extra={k: v for k, v in child.attrib.items() if k not in known},
+                        )
+                        part.shape_config = shape_config
+                        if obj.shape_config is None:
+                            obj.shape_config = shape_config
 
                 # mesh_stat
                 ms_el = part_el.find("mesh_stat")
@@ -1146,6 +1248,11 @@ class Bambu3MF:
             for warn_el in plate_el.findall("warning"):
                 sp.warnings.append(dict(warn_el.attrib))
 
+            layer_lists_el = plate_el.find("layer_filament_lists")
+            if layer_lists_el is not None:
+                for item_el in layer_lists_el.findall("layer_filament_list"):
+                    sp.layer_filament_lists.append(dict(item_el.attrib))
+
             si.plates.append(sp)
 
         self.slice_info = si
@@ -1175,6 +1282,22 @@ class Bambu3MF:
                     co.connectors.append(cc)
             self.cut_objects.append(co)
 
+    def _load_embedded_shape_files(self, archive: zipfile.ZipFile, names: set[str]):
+        for obj in self.objects:
+            for part in obj.parts:
+                shape_config = part.shape_config
+                if shape_config and shape_config.filepath3mf and shape_config.filepath3mf in names:
+                    shape_config.svg_file_data = archive.read(shape_config.filepath3mf)
+
+    def _collect_shape_svg_files(self) -> dict[str, bytes]:
+        svg_files: dict[str, bytes] = {}
+        for obj in self.objects:
+            for part in obj.parts:
+                shape_config = part.shape_config
+                if shape_config and shape_config.filepath3mf and shape_config.svg_file_data:
+                    svg_files[shape_config.filepath3mf] = shape_config.svg_file_data
+        return svg_files
+
     # ─── BUILDERS ────────────────────────────────────────────────────────────
 
     def _build_content_types(self) -> str:
@@ -1184,8 +1307,7 @@ class Bambu3MF:
         lines.append(' <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>')
         lines.append(' <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>')
         lines.append(' <Default Extension="png" ContentType="image/png"/>')
-        if self.gcode_files:
-            lines.append(' <Default Extension="gcode" ContentType="text/x.gcode"/>')
+        lines.append(' <Default Extension="gcode" ContentType="text/x.gcode"/>')
         lines.append('</Types>')
         return "\n".join(lines) + "\n"
 
@@ -1210,6 +1332,12 @@ class Bambu3MF:
                     thumb_middle = name
                 if "thumbnail_small" in name:
                     thumb_small = name
+            if thumb_main is None and "Metadata/plate_1.png" in self.thumbnails:
+                thumb_main = "Metadata/plate_1.png"
+            if thumb_middle is None:
+                thumb_middle = thumb_main
+            if thumb_small is None and "Metadata/plate_1_small.png" in self.thumbnails:
+                thumb_small = "Metadata/plate_1_small.png"
             if thumb_main:
                 lines.append(f' <Relationship Target="/{thumb_main}" Id="rel-2" Type="{REL_THUMBNAIL}"/>')
             if thumb_middle:
@@ -1228,14 +1356,91 @@ class Bambu3MF:
         lines.append('</Relationships>')
         return "\n".join(lines) + "\n"
 
+    def _build_model_config_rels(self) -> str:
+        lines = ['<?xml version="1.0" encoding="UTF-8"?>']
+        lines.append('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">')
+        for index, path in enumerate(sorted(self.gcode_files.keys()), 1):
+            lines.append(f' <Relationship Target="/{path}" Id="rel-{index}" Type="{REL_GCODE}"/>')
+        lines.append('</Relationships>')
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _extract_uuid_seed(uuid: str, *suffixes: str) -> Optional[int]:
+        for suffix in suffixes:
+            if uuid.endswith(suffix):
+                prefix = uuid[:-len(suffix)]
+                try:
+                    return int(prefix, 16)
+                except ValueError:
+                    return None
+        return None
+
+    @staticmethod
+    def _production_uuid(seed: int, suffix: str) -> str:
+        return f"{seed & 0xFFFFFFFF:08x}{suffix}"
+
+    def _sub_model_parent_id(self, model_path: str) -> Optional[int]:
+        for obj in self.objects:
+            for comp in obj.components:
+                if comp.path == model_path:
+                    return obj.id
+        return None
+
+    def _ensure_production_identifiers(self):
+        if not self.build_uuid:
+            self.build_uuid = BUILD_UUID
+
+        for obj in self.objects:
+            if obj.backup_id is None:
+                obj.backup_id = self._extract_uuid_seed(obj.uuid, OBJECT_UUID_SUFFIX, OBJECT_UUID_SUFFIX2)
+            if obj.backup_id is None:
+                obj.backup_id = obj.id
+            if not obj.uuid:
+                uses_shared_mesh = obj.uuid.endswith(OBJECT_UUID_SUFFIX2) or any(part.mesh_shared for part in obj.parts)
+                suffix = OBJECT_UUID_SUFFIX2 if uses_shared_mesh else OBJECT_UUID_SUFFIX
+                obj.uuid = self._production_uuid(obj.backup_id, suffix)
+
+            for index, comp in enumerate(obj.components):
+                if not comp.uuid:
+                    comp.uuid = self._production_uuid(index + (obj.backup_id << 16), COMPONENT_UUID_SUFFIX)
+
+        for bi in self.build_items:
+            if not bi.uuid:
+                obj = self._find_object(bi.objectid)
+                seed = obj.backup_id if obj and obj.backup_id is not None else bi.objectid
+                bi.uuid = self._production_uuid(seed, BUILD_UUID_SUFFIX)
+
+        for model_path, leaf_objects in self.sub_models.items():
+            parent_id = self._sub_model_parent_id(model_path)
+            parent_obj = self._find_object(parent_id) if parent_id is not None else None
+            parent_backup_id = parent_obj.backup_id if parent_obj and parent_obj.backup_id is not None else parent_id
+            for index, obj in enumerate(leaf_objects):
+                if obj.backup_id is None:
+                    obj.backup_id = self._extract_uuid_seed(obj.uuid, SUB_OBJECT_UUID_SUFFIX)
+                if not obj.uuid:
+                    seed = obj.id if parent_backup_id is None else index + (parent_backup_id << 16)
+                    obj.uuid = self._production_uuid(seed, SUB_OBJECT_UUID_SUFFIX)
+
     def _build_main_model(self) -> str:
         """Build 3D/3dmodel.model XML.
         Verified against bbs_3mf.cpp:6805-6810"""
         lines = ['<?xml version="1.0" encoding="UTF-8"?>']
 
-        # v2: xmlns:p is conditional on production extension usage, matching bbs_3mf.cpp:6807
-        has_production = bool(self.sub_models or any(o.uuid for o in self.objects))
+        # v2: xmlns:p is conditional on actual production-extension usage.
+        has_production = bool(
+            self.sub_models
+            or any(o.uuid for o in self.objects)
+            or any(
+                comp.path or comp.uuid
+                for obj in self.objects
+                for comp in obj.components
+            )
+            or any(item.uuid or item.path for item in self.build_items)
+        )
         has_materials = bool(self.color_groups)
+
+        if has_production:
+            self._ensure_production_identifiers()
 
         model_attrs = (
             f'<model unit="millimeter" xml:lang="en-US"'
@@ -1299,21 +1504,32 @@ class Bambu3MF:
         lines.append(' </resources>')
 
         # Build
-        lines.append(f' <build p:UUID="{self.build_uuid}">')
+        if has_production:
+            lines.append(f' <build p:UUID="{self.build_uuid}">')
+        elif not self.build_items:
+            lines.append(' <build/>')
+        else:
+            lines.append(' <build>')
+
         for bi in self.build_items:
             battrs = f'objectid="{bi.objectid}"'
-            if bi.uuid:
+            if has_production and bi.uuid:
                 battrs += f' p:UUID="{bi.uuid}"'
+            if bi.path:
+                battrs += f' p:path="{_xml_escape_attr(bi.path)}"'
             battrs += f' transform="{bi.transform}"'
             battrs += f' printable="{bi.printable}"'
             lines.append(f'  <item {battrs}/>')
-        lines.append(' </build>')
+
+        if self.build_items or has_production:
+            lines.append(' </build>')
 
         lines.append('</model>')
         return "\n".join(lines) + "\n"
 
     def _build_sub_model(self, model_path: str, leaf_objects: list) -> str:
         """Build an external sub-model file XML."""
+        self._ensure_production_identifiers()
         lines = ['<?xml version="1.0" encoding="UTF-8"?>']
         lines.append(
             '<model unit="millimeter" xml:lang="en-US"'
@@ -1367,8 +1583,6 @@ class Bambu3MF:
                 tattrs += f' face_property="{t.face_property}"'
             if t.pid is not None:
                 tattrs += f' pid="{t.pid}"'
-            if t.pindex is not None:
-                tattrs += f' pindex="{t.pindex}"'
             if t.p1 is not None:
                 tattrs += f' p1="{t.p1}"'
             if t.p2 is not None:
@@ -1378,6 +1592,88 @@ class Bambu3MF:
             lines.append(f'{pad}  <triangle {tattrs}/>')
         lines.append(f'{pad} </triangles>')
         lines.append(f'{pad}</mesh>')
+
+    def _write_text_info(self, lines: list, text_info: TextInfo, indent: int = 6):
+        pad = " " * indent
+        attrs = []
+        for key, value in [
+            ("text", text_info.text),
+            ("font_name", text_info.font_name),
+            ("font_version", text_info.font_version),
+            ("style_name", text_info.style_name),
+            ("boldness", text_info.boldness),
+            ("skew", text_info.skew),
+            ("font_index", text_info.font_index),
+            ("font_size", text_info.font_size),
+            ("thickness", text_info.thickness),
+            ("embeded_depth", text_info.embeded_depth),
+            ("rotate_angle", text_info.rotate_angle),
+            ("text_gap", text_info.text_gap),
+            ("bold", text_info.bold),
+            ("italic", text_info.italic),
+        ]:
+            if value != "":
+                attrs.append(f'{key}="{_xml_escape_attr(value)}"')
+
+        try:
+            font_version = float(text_info.font_version) if text_info.font_version else 0.0
+        except ValueError:
+            font_version = 0.0
+
+        if font_version > 2.2:
+            if text_info.surface_type != "":
+                attrs.append(f'surface_type="{_xml_escape_attr(text_info.surface_type)}"')
+        else:
+            if text_info.surface_text != "":
+                attrs.append(f'surface_text="{_xml_escape_attr(text_info.surface_text)}"')
+            if text_info.keep_horizontal != "":
+                attrs.append(f'keep_horizontal="{_xml_escape_attr(text_info.keep_horizontal)}"')
+
+        for key, value in [
+            ("hit_mesh", text_info.hit_mesh),
+            ("hit_position", text_info.hit_position),
+            ("hit_normal", text_info.hit_normal),
+        ]:
+            if value != "":
+                attrs.append(f'{key}="{_xml_escape_attr(value)}"')
+
+        attr_text = " ".join(attrs)
+        lines.append(f'{pad}<text_info {attr_text}/>' )
+
+    def _write_shape_config(self, lines: list, shape_config: ShapeConfig, indent: int = 6):
+        pad = " " * indent
+        attrs = []
+        for key, value in [
+            ("filepath", shape_config.filepath),
+            ("filepath3mf", shape_config.filepath3mf),
+            ("scale", shape_config.scale),
+            ("unhealed", shape_config.unhealed),
+            ("depth", shape_config.depth),
+            ("use_surface", shape_config.use_surface),
+            ("transform", shape_config.transform),
+            ("style_name", shape_config.style_name),
+            ("font_descriptor", shape_config.font_descriptor),
+            ("font_descriptor_type", shape_config.font_descriptor_type),
+            ("char_gap", shape_config.char_gap),
+            ("line_gap", shape_config.line_gap),
+            ("line_height", shape_config.line_height),
+            ("boldness", shape_config.boldness),
+            ("skew", shape_config.skew),
+            ("per_glyph", shape_config.per_glyph),
+            ("horizontal", shape_config.horizontal),
+            ("vertical", shape_config.vertical),
+            ("collection", shape_config.collection),
+            ("family", shape_config.family),
+            ("face_name", shape_config.face_name),
+            ("style", shape_config.style),
+            ("weight", shape_config.weight),
+        ]:
+            if value != "":
+                attrs.append(f'{key}="{_xml_escape_attr(value)}"')
+        for key, value in shape_config.extra.items():
+            attrs.append(f'{key}="{_xml_escape_attr(value)}"')
+        attr_text = " ".join(attrs)
+        lines.append(f'{pad}<BambuStudioShape {attr_text}/>' )
 
     def _build_model_settings(self) -> str:
         """Build Metadata/model_settings.config XML."""
@@ -1410,12 +1706,22 @@ class Bambu3MF:
                 lines.append(f'      <metadata key="source_offset_x" value="{part.source_offset_x}"/>')
                 lines.append(f'      <metadata key="source_offset_y" value="{part.source_offset_y}"/>')
                 lines.append(f'      <metadata key="source_offset_z" value="{part.source_offset_z}"/>')
+                if part.source_in_inches:
+                    lines.append(f'      <metadata key="source_in_inches" value="{part.source_in_inches}"/>')
+                if part.source_in_meters:
+                    lines.append(f'      <metadata key="source_in_meters" value="{part.source_in_meters}"/>')
                 if part.extruder:
                     lines.append(f'      <metadata key="extruder" value="{part.extruder}"/>')
                 if part.mesh_shared:
                     lines.append(f'      <metadata key="mesh_shared" value="{part.mesh_shared}"/>')
                 for key, value in part.extra_metadata.items():
                     lines.append(f'      <metadata key="{key}" value="{_xml_escape_attr(value)}"/>')
+                shape_config = part.shape_config or (obj.shape_config if len(obj.parts) == 1 else None)
+                if shape_config is not None:
+                    self._write_shape_config(lines, shape_config)
+                text_info = part.text_info or (obj.text_info if len(obj.parts) == 1 else None)
+                if text_info is not None and text_info.text:
+                    self._write_text_info(lines, text_info)
                 if part.mesh_stat:
                     ms = part.mesh_stat
                     lines.append(
@@ -1555,6 +1861,12 @@ class Bambu3MF:
             for warn in sp.warnings:
                 attrs = " ".join(f'{k}="{_xml_escape_attr(v)}"' for k, v in warn.items())
                 lines.append(f'    <warning {attrs} />')
+            if sp.layer_filament_lists:
+                lines.append('    <layer_filament_lists>')
+                for item in sp.layer_filament_lists:
+                    attrs = " ".join(f'{k}="{_xml_escape_attr(v)}"' for k, v in item.items())
+                    lines.append(f'      <layer_filament_list {attrs} />')
+                lines.append('    </layer_filament_lists>')
             lines.append('  </plate>')
 
         lines.append('</config>')

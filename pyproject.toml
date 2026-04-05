@@ -5,7 +5,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 [project]
 name = "bambu3mf"
 version = "2.0.0"
-description = "Read, modify, and write Bambu Studio .3mf project files with byte-perfect round-trip fidelity"
+description = "Agent-friendly toolkit and Python library for inspecting and editing Bambu Studio .3mf project files"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -16,6 +16,7 @@ keywords = ["3mf", "bambu", "bambulab", "bambu-studio", "3d-printing", "slicer"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

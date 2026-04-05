@@ -1,5 +1,23 @@
 # Bambu .3mf file format reference
 
+This file is the technical appendix.
+
+If you are trying to use an agent to change a print file, you usually do not need to start here. This reference is for understanding where Bambu stores data once you want the lower-level details.
+
+## Plain-language overview
+
+A Bambu `.3mf` is a ZIP file that usually contains three main kinds of information:
+
+- model data, including meshes and object relationships
+- print settings, including project, object, and plate settings
+- extras, like thumbnails, sliced gcode, presets, and auxiliary files
+
+The main practical idea is simple:
+
+- `3D/` holds model structure and mesh data
+- `Metadata/` holds most settings and print-related metadata
+- `Auxiliaries/` holds extra files such as images
+
 ## File structure
 
 A Bambu `.3mf` is a ZIP archive:
@@ -14,7 +32,7 @@ file.3mf
 │   └── Objects/
 │       └── object_N.model                 # Mesh data (vertices, triangles, painting)
 ├── Metadata/
-│   ├── project_settings.config            # 700+ slicer settings (JSON)
+│   ├── project_settings.config            # Main slicer/project settings (JSON)
 │   ├── model_settings.config              # Per-object/part overrides, plates, assembly (XML)
 │   ├── slice_info.config                  # Slice metadata: time, weight, filament usage (XML)
 │   ├── cut_information.xml                # Cut planes and connectors
@@ -47,11 +65,11 @@ file.3mf
 
 ### project_settings.config (JSON)
 
-Contains all slicer settings as a flat JSON object. 700+ keys covering layer height, speeds, temperatures, infill, walls, support, retraction, etc.
+Contains the main project-level slicer settings as a flat JSON object. In practice this is where an agent will often read or change values like layer height, speeds, temperatures, infill, walls, support, and retraction.
 
 ### model_settings.config (XML)
 
-Contains per-object settings overrides, plate definitions with object-to-plate assignments, assembly transforms, and per-plate settings (bed_type, print_sequence, spiral_mode, etc.).
+Contains per-object overrides, plate definitions, object-to-plate assignments, assembly transforms, and per-plate settings such as `bed_type`, `print_sequence`, and `spiral_mode`.
 
 ### 3dmodel.model (XML)
 
@@ -63,7 +81,7 @@ Main model file with:
 
 ### Objects/object_N.model (XML)
 
-Sub-model files containing actual mesh data:
+Sub-model files containing the actual mesh data:
 - Vertices (`<vertex x= y= z=/>`)
 - Triangles (`<triangle v1= v2= v3=/>`) with per-triangle painting attributes:
   - `paint_supports` — support painting hex data

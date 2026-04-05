@@ -11,7 +11,12 @@ metadata:
 
 # bambu-3mf
 
-Read, modify, and write Bambu Studio .3mf project files with byte-perfect round-trip fidelity.
+Read, modify, and write Bambu Studio .3mf project files while preserving unmodified sections when possible.
+
+This skill is meant to work for two kinds of requests:
+
+- practical print-file help, like changing settings or explaining what is in a project
+- deeper technical work, like scripting, auditing file contents, or editing mesh-related data
 
 ## Library location
 
@@ -36,7 +41,7 @@ from bambu3mf import Bambu3MF
 proj = Bambu3MF.load("file.3mf")
 
 # Create from scratch
-proj = Bambu3MF.new()  # empty project with 1 plate and BambuStudio metadata
+proj = Bambu3MF.new()  # minimal project scaffold with 1 plate and BambuStudio metadata
 
 # Inspect
 print(proj.summary())                   # includes plate bed_type
@@ -111,11 +116,11 @@ python bambu3mf.py file.3mf round-trip output.3mf
 
 ## What it handles
 
-- Full project structure, all Bambu extensions
+- Full Bambu project packaging used by common Bambu Studio project and gcode bundles
 - Mesh data with full precision
 - Per-triangle painting (support, seam, MMU color, fuzzy skin)
 - Multi-plate layout with per-plate settings
-- 700+ slicer settings
+- Many slicer settings across project, object, and plate data
 - Per-object/part setting overrides
 - AMS filament mapping and flush matrix
 - Cut/connector info
@@ -125,6 +130,13 @@ python bambu3mf.py file.3mf round-trip output.3mf
 - Embedded presets (process, filament, machine)
 - Shape/emboss config (ShapeConfig)
 - Mesh sharing
+
+## Verified scope limits
+
+- This is not a complete implementation of every 3MF extension defined by the 3MF Core, Materials, and Production specs.
+- Materials support is limited to Bambu-relevant `m:colorgroup` data plus triangle `pid`/`p1`/`p2`/`p3` properties; it does not provide first-class support for `basematerials`, `texture2d`, `texture2dgroup`, `multiproperties`, or display-property groups.
+- Production support covers the BambuStudio paths used here: `p:UUID`, `p:path`, split sub-model relationships, and gcode relationships. It does not implement the Production Alternatives schema (`pa:alternatives`, `modelresolution`).
+- Unknown archive files are preserved through the raw-file catch-all, but unknown XML structures are only preserved if the corresponding section is not regenerated.
 
 ## Key data structures
 
@@ -156,5 +168,5 @@ For detailed file structure and namespace reference, see `references/file-format
 - UUID suffixes are constants from BambuStudio source — don't invent new ones
 - `project_settings.config` is JSON; `model_settings.config` is XML
 - Object `settings` is an ordered list of `(key, value)` tuples — order matters
-- Handles both `p:UUID` and `p:uuid` attribute forms
+- Accepts both `p:UUID` and `p:uuid` attribute forms when reading files
 - Embedded presets preserved through round-trip via raw_files catch-all
